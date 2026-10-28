@@ -10,6 +10,7 @@ import hashlib
 import html
 import json
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -179,20 +180,35 @@ CATEGORY_WORDS = {
 }
 
 
+GEO_WORDS = ["ташкент", "узбекистан", "uzbekistan", "tashkent", "toshkent", "o'zbekiston"]
+FOOD_WORDS = [
+    "ресторан", "кафе", "еда", "еды", "общепит", "фастфуд", "пицц", "суши", "ролл",
+    "бургер", "лаваш", "шаурм", "курьер", "доставк", "кофейн",
+]
+
+
+def _has(low, words):
+    # совпадение только с начала слова, чтобы «цен» не находилось внутри «Автоцентра»
+    return any(re.search(r"\b" + re.escape(w), low) for w in words)
+
+
 def analyze_keywords(cfg, items_chunk):
     out = []
     companies = cfg.get("companies", [])
     for it in items_chunk:
         low = (it["title"] + " " + it["text"]).lower()
-        cats = [c for c, words in CATEGORY_WORDS.items() if any(w in low for w in words)]
+        company = next((c for c in companies if c.lower() in low), None)
+        # без названия компании берём только местные новости про еду и доставку
+        if not company and not (_has(low, GEO_WORDS) and _has(low, FOOD_WORDS)):
+            continue
+        cats = [c for c, words in CATEGORY_WORDS.items() if _has(low, words)]
         if not cats:
             continue
-        company = next((c for c in companies if c.lower() in low), "рынок")
         out.append(
             {
-                "company": company,
+                "company": company or "рынок",
                 "category": cats[0],
-                "importance": min(5, 1 + len(cats) + (1 if company != "рынок" else 0)),
+                "importance": min(5, 1 + len(cats) + (2 if company else 0)),
                 "summary": it["title"][:200],
                 "url": it["url"],
                 "source": it["source"],
