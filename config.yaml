@@ -1,0 +1,38 @@
+# За кем следим. Добавляйте и убирайте строки как хотите.
+companies:
+  - Evos
+  - Brezeri        # поправьте написание, если у компании другое название
+  - Bellissimo
+  - Max Way
+  - Oqtepa Lavash
+  - Chopar Pizza
+  - Dodo Pizza
+  - KFC
+  - Burger King
+  - Яндекс Еда
+  - Wolt
+  - Express24
+
+# Общие запросы по рынку
+general_queries:
+  - рестораны Ташкент новости
+  - доставка еды Узбекистан
+  - фастфуд Узбекистан
+  - курьеры доставка Ташкент
+
+# Публичные Telegram-каналы (без @). Откройте https://t.me/s/ИМЯ в браузере:
+# если видите посты, канал подходит. Впишите сюда новостные каналы про еду
+# и официальные каналы конкурентов.
+telegram_channels: []
+#  - example_channel
+
+# Чем анализировать новости:
+#   gemini   - бесплатно (ключ из Google AI Studio, переменная GEMINI_API_KEY)
+#   claude   - платно (ключ Anthropic, нужен pip install anthropic)
+#   Если ключа нет или ИИ недоступен, бот сам перейдёт на поиск по ключевым словам.
+provider: gemini
+gemini_model: gemini-2.5-flash   # если ошибка 404, возьмите актуальную модель в Google AI Studio
+claude_model: claude-sonnet-5-5
+
+# Максимум новостей в одном отчёте
+max_items_in_report: 15
