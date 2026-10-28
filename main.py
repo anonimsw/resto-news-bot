@@ -134,26 +134,79 @@ SYSTEM_PROMPT = """Ты аналитик рынка общепита и дост
 Не выдумывай факты, которых нет в тексте."""
 
 
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+_gemini_model_cache = {}
+
+
+def _gemini_headers():
+    return {"x-goog-api-key": os.environ["GEMINI_API_KEY"]}
+
+
+def _gemini_generate(model, prompt):
+    r = requests.post(
+        f"{GEMINI_BASE}/models/{model}:generateContent",
+        headers=_gemini_headers(),
+        json={
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "maxOutputTokens": 4000,
+            },
+        },
+        timeout=120,
+    )
+    r.raise_for_status()
+    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def _gemini_candidates():
+    """Спрашиваем у Google, какие модели доступны этому ключу, и берём быстрые (flash)."""
+    r = requests.get(f"{GEMINI_BASE}/models?pageSize=200", headers=_gemini_headers(), timeout=30)
+    r.raise_for_status()
+    bad = ["image", "tts", "live", "audio", "embedding", "vision", "robotics", "computer"]
+    names = []
+    for m in r.json().get("models", []):
+        name = m.get("name", "").replace("models/", "")
+        if "generateContent" not in m.get("supportedGenerationMethods", []):
+            continue
+        if "flash" not in name or any(w in name for w in bad):
+            continue
+        names.append(name)
+    # сначала стабильные, без preview/exp; внутри группы — новые версии выше, lite в конце
+    def rank(n):
+        return (("preview" in n or "exp" in n), "lite" in n, [-ord(c) for c in n])
+    return sorted(names, key=rank)
+
+
 def call_llm(cfg, prompt):
     """Возвращает текст ответа модели или None, если ключа нет."""
     provider = cfg.get("provider", "gemini")
     if provider == "gemini" and os.getenv("GEMINI_API_KEY"):
-        model = cfg.get("gemini_model", "gemini-2.5-flash")
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
-            json={
-                "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "maxOutputTokens": 4000,
-                },
-            },
-            timeout=120,
-        )
-        r.raise_for_status()
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        if "model" in _gemini_model_cache:
+            return _gemini_generate(_gemini_model_cache["model"], prompt)
+        tried = []
+        first = cfg.get("gemini_model")
+        if first:
+            try:
+                text = _gemini_generate(first, prompt)
+                _gemini_model_cache["model"] = first
+                return text
+            except requests.HTTPError as e:
+                tried.append(f"{first}: {e.response.status_code}")
+        last_err = None
+        for name in _gemini_candidates()[:4]:
+            if name == first:
+                continue
+            try:
+                text = _gemini_generate(name, prompt)
+                _gemini_model_cache["model"] = name
+                print(f"[info] Использую модель Gemini: {name}")
+                return text
+            except requests.HTTPError as e:
+                tried.append(f"{name}: {e.response.status_code}")
+                last_err = e
+        raise RuntimeError("ни одна модель Gemini не ответила (" + "; ".join(tried) + ")")
     if provider == "claude" and os.getenv("ANTHROPIC_API_KEY"):
         from anthropic import Anthropic  # платный вариант, нужен pip install anthropic
 
