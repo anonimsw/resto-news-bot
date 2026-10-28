@@ -14,6 +14,7 @@ import re
 import smtplib
 import ssl
 import sys
+import time
 from email.mime.text import MIMEText
 from urllib.parse import quote
 
@@ -67,7 +68,7 @@ def fetch_google_news(query, lang="ru", country="UZ"):
                 "source": "Google News",
                 "title": e.get("title", ""),
                 "url": e.get("link", ""),
-                "text": summary[:500],
+                "text": summary[:400],
             }
         )
     return items
@@ -88,7 +89,7 @@ def fetch_telegram_channel(handle):
                 "source": f"t.me/{handle}",
                 "title": text[:120],
                 "url": link_el["href"],
-                "text": text[:800],
+                "text": text[:400],
             }
         )
     return items
@@ -143,21 +144,26 @@ def _gemini_headers():
 
 
 def _gemini_generate(model, prompt):
-    r = requests.post(
-        f"{GEMINI_BASE}/models/{model}:generateContent",
-        headers=_gemini_headers(),
-        json={
-            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "maxOutputTokens": 4000,
-            },
+    body = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 3000,
         },
-        timeout=120,
-    )
-    r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    }
+    for attempt in range(2):
+        r = requests.post(
+            f"{GEMINI_BASE}/models/{model}:generateContent",
+            headers=_gemini_headers(),
+            json=body,
+            timeout=60,
+        )
+        if r.status_code == 429 and attempt == 0:  # лимит бесплатного тарифа, ждём и повторяем
+            time.sleep(20)
+            continue
+        r.raise_for_status()
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 def _gemini_candidates():
@@ -173,9 +179,9 @@ def _gemini_candidates():
         if "flash" not in name or any(w in name for w in bad):
             continue
         names.append(name)
-    # сначала стабильные, без preview/exp; внутри группы — новые версии выше, lite в конце
+    # сначала стабильные без preview/exp; внутри группы сначала быстрые lite, потом новые версии
     def rank(n):
-        return (("preview" in n or "exp" in n), "lite" in n, [-ord(c) for c in n])
+        return (("preview" in n or "exp" in n), "lite" not in n, [-ord(c) for c in n])
     return sorted(names, key=rank)
 
 
@@ -183,29 +189,30 @@ def call_llm(cfg, prompt):
     """Возвращает текст ответа модели или None, если ключа нет."""
     provider = cfg.get("provider", "gemini")
     if provider == "gemini" and os.getenv("GEMINI_API_KEY"):
-        if "model" in _gemini_model_cache:
-            return _gemini_generate(_gemini_model_cache["model"], prompt)
-        tried = []
-        first = cfg.get("gemini_model")
-        if first:
+        cached = _gemini_model_cache.get("model")
+        if cached:
             try:
-                text = _gemini_generate(first, prompt)
-                _gemini_model_cache["model"] = first
-                return text
-            except requests.HTTPError as e:
-                tried.append(f"{first}: {e.response.status_code}")
-        last_err = None
-        for name in _gemini_candidates()[:4]:
-            if name == first:
-                continue
+                return _gemini_generate(cached, prompt)
+            except requests.RequestException as e:
+                print(f"[warn] {cached} не ответила ({type(e).__name__}), пробую другие", file=sys.stderr)
+                _gemini_model_cache.pop("model", None)
+        tried = []
+        names = []
+        if cfg.get("gemini_model"):
+            names.append(cfg["gemini_model"])
+        try:
+            names += [n for n in _gemini_candidates() if n not in names][:3]
+        except requests.RequestException as e:
+            tried.append(f"список моделей: {type(e).__name__}")
+        for name in names:
             try:
                 text = _gemini_generate(name, prompt)
                 _gemini_model_cache["model"] = name
                 print(f"[info] Использую модель Gemini: {name}")
                 return text
-            except requests.HTTPError as e:
-                tried.append(f"{name}: {e.response.status_code}")
-                last_err = e
+            except requests.RequestException as e:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                tried.append(f"{name}: {code or type(e).__name__}")
         raise RuntimeError("ни одна модель Gemini не ответила (" + "; ".join(tried) + ")")
     if provider == "claude" and os.getenv("ANTHROPIC_API_KEY"):
         from anthropic import Anthropic  # платный вариант, нужен pip install anthropic
@@ -275,7 +282,7 @@ def analyze(cfg, items):
         return []
     ids = list(items.keys())
     results = []
-    batch_size = 30
+    batch_size = 10
     for start in range(0, len(ids), batch_size):
         chunk = ids[start : start + batch_size]
         chunk_items = [items[i] for i in chunk]
@@ -286,6 +293,7 @@ def analyze(cfg, items):
         parsed = None
         try:
             raw = call_llm(cfg, "\n\n".join(lines))
+            time.sleep(4)  # не упираемся в лимит запросов в минуту
             if raw:
                 raw = raw.replace("```json", "").replace("```", "").strip()
                 parsed = json.loads(raw)
